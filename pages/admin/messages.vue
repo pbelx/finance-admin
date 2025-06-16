@@ -14,9 +14,8 @@
               No active conversations with unread messages.
             </v-alert>
             <v-list v-else two-line>
-              <template v-for="(convo, index) in conversations">
+              <template v-for="(convo, index) in conversations" :key="convo.id">
                 <v-list-item
-                  :key="convo.id"
                   @click="selectConversation(convo)"
                   :class="{ 'blue lighten-4': selectedConversation && selectedConversation.id === convo.id }"
                   link
@@ -326,12 +325,15 @@ export default {
   },
   created() {
     // Fetch initial conversations when component is created
-    this.fetchConversations();
+    // this.fetchConversations(); // Moved to mounted()
 
     // Example: Set adminUserId from a global store or auth plugin if available
     // if (this.$auth && this.$auth.user) {
     //   this.adminUserId = this.$auth.user.id;
     // }
+  },
+  mounted() {
+    this.fetchConversations();
   },
 };
 </script>
