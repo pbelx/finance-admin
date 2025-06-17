@@ -295,7 +295,7 @@ export default {
         if (response.data && response.data.status) {
           // Messages should be sorted by created_at ascending (chat order)
           this.chatHistory = (response.data.payload || []).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-          this.markMessagesAsRead(orderId);
+          // this.markMessagesAsRead(orderId); // Removed call
         } else {
           console.error(`Failed to fetch chat history for order ${orderId}: API returned unsuccessful status`, response.data);
           alert(`Failed to load chat history. ${response.data?.payload || 'Unknown API error.'}`);
@@ -412,37 +412,7 @@ export default {
         this.sendingReply = false;
       }
     },
-      async markMessagesAsRead(orderId) { // This function is order-specific
-      if (!orderId) {
-        // Cannot mark messages as read for a direct chat without an orderId via this method
-        // A different API might be needed for direct chats e.g. PATCH /messages/read/user/{userId}
-        console.log('markMessagesAsRead called without orderId (likely direct chat), skipping.');
-        return;
-      }
-      console.log('Attempting to mark messages as read for order:', orderId);
-      try {
-        const response = await this.$api.patch(`/messages/read/${orderId}`);
-        if (response.data && response.data.status) {
-          console.log('Successfully marked messages as read for order (API):', orderId);
-
-          // Update unreadCount for the specific order-based conversation
-          const conversationKey = `order-${orderId}`;
-          const convoIndex = this.conversations.findIndex(c => c.id === conversationKey);
-          if (convoIndex !== -1) {
-            if (typeof this.conversations[convoIndex].unreadCount === 'number') {
-               this.conversations[convoIndex].unreadCount = 0;
-            }
-          }
-        } else {
-          console.error('Failed to mark messages as read: API returned unsuccessful status for order ' + orderId, response.data);
-        }
-      } catch (error) {
-        console.error('Error marking messages as read for order ' + orderId + ':', error);
-        if (error.response) {
-          console.error('Error response data:', error.response.data);
-        }
-      }
-    },
+    // Removed markMessagesAsRead(orderId) method
     formatTimestamp(timestamp) {
       if (!timestamp) return '';
       return new Date(timestamp).toLocaleString();
