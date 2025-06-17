@@ -21,7 +21,11 @@
                   link
                 >
                   <v-list-item-content>
-                    <v-list-item-title>Order ID: {{ convo.order.id }}</v-list-item-title>
+                    <v-list-item-title>
+                      <span v-if="convo.isDirectChat">Direct Chat with {{ convo.user.name }}</span>
+                      <span v-else-if="convo.order">Order ID: {{ convo.order.id }}</span>
+                      <span v-else>Conversation</span> <!-- Fallback -->
+                    </v-list-item-title>
                     <v-list-item-subtitle>
                       {{ convo.user.name }} ({{ convo.user.email }})
                     </v-list-item-subtitle>
@@ -59,7 +63,9 @@
           </div>
           <template v-else>
             <v-card-title class="text-h6">
-              Chat with {{ selectedConversation.user.name }} (Order: {{ selectedConversation.order.id }})
+              <span v-if="selectedConversation.isDirectChat">Chat with {{ selectedConversation.user.name }}</span>
+              <span v-else-if="selectedConversation.order">Chat with {{ selectedConversation.user.name }} (Order: {{ selectedConversation.order.id }})</span>
+              <span v-else>Chat with {{ selectedConversation.user.name }}</span> <!-- Fallback if somehow order is null but not direct -->
             </v-card-title>
             <v-divider></v-divider>
             <v-card-text class="flex-grow-1 overflow-y-auto pa-3 chat-history-vuetify">
@@ -133,19 +139,24 @@ export default {
       // Placeholder for admin user ID - this will be needed for marking messages read
       // and potentially for other logic. It should be fetched from auth state.
       adminUserId: null,
+      rawInitialMessages: [],
     };
   },
   methods: {
     async fetchConversations() {
       this.loadingConversations = true;
+      this.rawInitialMessages = []; // Clear previous raw messages
       try {
         const response = await this.$api.get('/messages');
         if (response.data && response.data.status) {
-          this.processAndGroupMessages(response.data.payload || []);
+          const messagesPayload = response.data.payload || [];
+          this.rawInitialMessages = messagesPayload; // Store raw messages
+          this.processAndGroupMessages(messagesPayload);
         } else {
           console.error('Failed to fetch conversations: API returned unsuccessful status', response.data);
           alert('Failed to load conversations. ' + (response.data?.payload || 'Unknown API error.'));
           this.conversations = [];
+          // this.rawInitialMessages is already cleared at the start of try or here explicitly
         }
       } catch (error) {
         console.error('Error fetching conversations:', error);
@@ -156,61 +167,86 @@ export default {
           alert('Failed to fetch conversations: ' + error.message);
         }
         this.conversations = [];
+        // this.rawInitialMessages is already cleared at the start of try or here explicitly
       } finally {
         this.loadingConversations = false;
       }
     },
     processAndGroupMessages(messages) {
       const groups = messages.reduce((acc, message) => {
-        const orderId = message.order.id;
-        if (!acc[orderId]) {
-          acc[orderId] = [];
+        let conversationKey;
+        if (message.order && message.order.id) {
+          conversationKey = `order-${message.order.id}`;
+        } else {
+          // Direct chat
+          if (message.sender_type === 'user') {
+            if (!message.sender || !message.sender.id) {
+              console.error('Skipping message due to missing sender ID for direct user message:', message);
+              return acc;
+            }
+            conversationKey = `user-${message.sender.id}`;
+          } else if (message.sender_type === 'admin') {
+            if (!message.recipient || !message.recipient.id) {
+              console.error('Skipping message due to missing recipient ID for direct admin message:', message);
+              return acc;
+            }
+            conversationKey = `user-${message.recipient.id}`;
+          } else {
+            console.error('Skipping message due to unknown sender_type or missing ids for direct chat key:', message);
+            return acc;
+          }
         }
-        acc[orderId].push(message);
+
+        if (!acc[conversationKey]) {
+          acc[conversationKey] = [];
+        }
+        acc[conversationKey].push(message);
         return acc;
       }, {});
 
-      const processedConversations = Object.entries(groups).map(([orderId, groupMessages]) => {
-        // Sort messages within the group to find the last one easily
+      const processedConversations = Object.entries(groups).map(([key, groupMessages]) => {
         groupMessages.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
         const lastMessageInGroup = groupMessages[0];
+        const isDirect = !lastMessageInGroup.order;
 
-        let user = {};
-        // Prioritize order.user for customer details
+        let memberUser = { id: null, name: 'Unknown User', email: 'N/A' };
+
         if (lastMessageInGroup.order && lastMessageInGroup.order.user) {
-          user = {
+          memberUser = {
             id: lastMessageInGroup.order.user.id,
             name: lastMessageInGroup.order.user.full_name || 'Unknown User',
             email: lastMessageInGroup.order.user.email || 'N/A',
           };
-        } else if (lastMessageInGroup.sender_type === 'admin') { // If admin sent last, user is recipient
-          user = {
-            id: lastMessageInGroup.recipient?.id,
-            name: lastMessageInGroup.recipient?.full_name || 'Unknown User',
-            email: lastMessageInGroup.recipient?.email || 'N/A',
-          };
-        } else { // If user sent last, user is sender
-          user = {
-            id: lastMessageInGroup.sender?.id,
-            name: lastMessageInGroup.sender?.full_name || 'Unknown User',
-            email: lastMessageInGroup.sender?.email || 'N/A',
-          };
+        } else if (isDirect) {
+          if (lastMessageInGroup.sender_type === 'user' && lastMessageInGroup.sender) {
+            memberUser = {
+              id: lastMessageInGroup.sender.id,
+              name: lastMessageInGroup.sender.full_name || 'Unknown User',
+              email: lastMessageInGroup.sender.email || 'N/A',
+            };
+          } else if (lastMessageInGroup.sender_type === 'admin' && lastMessageInGroup.recipient) {
+            memberUser = {
+              id: lastMessageInGroup.recipient.id,
+              name: lastMessageInGroup.recipient.full_name || 'Unknown User',
+              email: lastMessageInGroup.recipient.email || 'N/A',
+            };
+          }
         }
 
         return {
-          id: parseInt(orderId), // Group key (Order ID)
-          order: lastMessageInGroup.order, // Full order object from the last message
-          user: user,
+          id: key, // This is now conversationKey (e.g., "order-101" or "user-2")
+          order: lastMessageInGroup.order,
+          isDirectChat: isDirect,
+          user: memberUser,
           lastMessage: {
             id: lastMessageInGroup.id,
             snippet: lastMessageInGroup.message.substring(0, 50) + (lastMessageInGroup.message.length > 50 ? '...' : ''),
             timestamp: lastMessageInGroup.created_at,
             sender_type: lastMessageInGroup.sender_type,
           },
-          // Assuming all messages fetched by GET /messages are unread for that admin
-          // Or, if the API provides an is_read flag, filter by !is_read before grouping.
-          // For this simulation, all fetched messages for a group are considered part of the unread count.
-          unreadCount: groupMessages.filter(m => !m.is_read || m.recipient?.id === this.adminUserId).length // Example logic
+          // As per prompt, GET /messages returns unread messages for the admin.
+          // So, the length of the group is the unread count for this conversation.
+          unreadCount: groupMessages.length,
         };
       });
 
@@ -223,7 +259,34 @@ export default {
       console.log('Selected conversation:', conversation);
       this.selectedConversation = conversation;
       this.chatHistory = []; // Clear previous chat history
-      this.fetchChatHistory(conversation.order.id);
+      this.loadingChatHistory = true; // Set loading true initially
+
+      if (conversation.isDirectChat) {
+        console.log(`Displaying initially fetched messages for direct chat with user ${conversation.user?.id}. This may not be the full history.`);
+
+        const directMessages = (this.rawInitialMessages || []).filter(msg => {
+          if (msg.order) return false; // Must not have an order
+
+          const memberId = conversation.user?.id;
+          if (!memberId) return false;
+
+          const isMemberSender = msg.sender_type === 'user' && msg.sender && msg.sender.id === memberId;
+          const isMemberRecipient = msg.sender_type === 'admin' && msg.recipient && msg.recipient.id === memberId;
+
+          return isMemberSender || isMemberRecipient;
+        });
+
+        this.chatHistory = directMessages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        this.loadingChatHistory = false;
+
+      } else if (conversation.order && conversation.order.id) {
+        // It's an order chat, fetch full history (this already sets loadingChatHistory internally)
+        this.fetchChatHistory(conversation.order.id);
+      } else {
+        console.warn('Selected conversation is neither a valid direct chat nor an order chat:', conversation);
+        this.chatHistory = []; // Ensure it's clear
+        this.loadingChatHistory = false; // Ensure loading is off
+      }
     },
     async fetchChatHistory(orderId) {
       this.loadingChatHistory = true;
@@ -256,19 +319,35 @@ export default {
         alert('Please enter a message.');
         return;
       }
-      if (!this.selectedConversation || !this.selectedConversation.order || !this.selectedConversation.user) {
-        console.error('No selected conversation, order, or user to send reply to.');
-        alert('Cannot send reply: No active conversation selected.');
+      if (!this.selectedConversation || !this.selectedConversation.user) {
+        console.error('No selected conversation or user to send reply to.');
+        alert('Cannot send reply: No active conversation or user selected.');
         return;
       }
 
-      const orderId = this.selectedConversation.order.id;
-      const recipientId = this.selectedConversation.user.id;
+      let orderIdForPayload = null;
+      // If it's not a direct chat, and it's an order with an ID, use that order's ID.
+      if (!this.selectedConversation.isDirectChat &&
+          this.selectedConversation.order &&
+          typeof this.selectedConversation.order.id === 'number') {
+        orderIdForPayload = this.selectedConversation.order.id;
+      }
+
+      const recipientId = this.selectedConversation.user?.id;
+
+      if (!recipientId) {
+        alert('Cannot send reply: Recipient user ID is missing.');
+        this.sendingReply = false; // ensure loading state is reset
+        return;
+      }
+
       const payload = {
-        message: this.replyMessage,
-        orderId: orderId,
+        message: this.replyMessage.trim(), // Ensure message is trimmed
+        orderId: orderIdForPayload, // Will be null for direct chats
         recipientId: recipientId,
       };
+
+      console.log('Sending reply with payload:', payload); // For debugging
 
       this.sendingReply = true;
       try {
@@ -276,7 +355,47 @@ export default {
         if (response.data && response.data.status) {
           console.log('Reply sent successfully.');
           this.replyMessage = '';
-          await this.fetchChatHistory(orderId); // Refresh chat history
+          // Refresh chat history. For direct chats, orderIdForPayload will be null.
+          // fetchChatHistory is designed to handle null orderId if we were to call it for direct chats,
+          // but current selectConversation logic for direct chats loads from rawInitialMessages.
+          // For consistency after sending a new message in a direct chat, we might need to re-filter rawInitialMessages or add the new message manually.
+          // However, the current implementation of sendReply for direct chats will still attempt to call fetchChatHistory with a null orderId,
+          // which fetchChatHistory is NOT currently designed to handle for fetching direct chat history.
+          // For now, we'll rely on the existing fetchChatHistory call.
+          // If it was an order chat, it fetches history for that order.
+          // If it was a direct chat, orderIdForPayload is null. The existing fetchChatHistory will try to fetch for order 'null' which is not ideal.
+          // A better approach for direct chats would be to update rawInitialMessages and re-process, or have a dedicated fetchDirectChatHistory.
+          // Given the current constraints, if it's a direct chat, we might just re-select the conversation to trigger the existing direct chat display logic.
+          if (this.selectedConversation.isDirectChat) {
+             // Re-selecting the conversation will trigger the logic to display from rawInitialMessages
+             // and ideally, the new message would be part of rawInitialMessages if GET /messages was re-fetched after sending.
+             // This is a simplification for now. A robust solution would update rawInitialMessages or add to chatHistory directly.
+             // For now, to ensure UI updates for direct chats after sending, we'll clear and let selectConversation re-filter
+             // This assumes the new message would appear if we re-fetched the *main* message list.
+             // A more immediate update would be to push the sent message to this.chatHistory manually.
+             const newSentMessage = {
+                id: Date.now(), // Temporary ID
+                created_at: new Date().toISOString(),
+                message: payload.message,
+                sender_name: 'Admin User', // Or a more dynamic admin name
+                recipient_name: this.selectedConversation.user.name,
+                sender_type: 'admin',
+                is_read: true,
+                order: this.selectedConversation.order // null for direct chats
+             };
+             this.chatHistory.push(newSentMessage);
+             if(this.selectedConversation.order?.id) { // only call fetchChatHistory if there is an orderId
+                await this.fetchChatHistory(this.selectedConversation.order.id);
+             } else {
+                // For direct chat, re-evaluate if selectConversation needs to be called or if manual push is enough
+                // To ensure the conversation list also updates its last message snippet, a full re-fetch of conversations might be better.
+                // this.fetchConversations(); // This would be a larger refresh.
+             }
+
+          } else if (orderIdForPayload) {
+             await this.fetchChatHistory(orderIdForPayload); // Refresh chat history for order chats
+          }
+
         } else {
           console.error('Failed to send reply: API returned unsuccessful status', response.data);
           alert(`Failed to send reply. ${response.data?.payload || 'Unknown API error.'}`);
@@ -293,14 +412,22 @@ export default {
         this.sendingReply = false;
       }
     },
-    async markMessagesAsRead(orderId) {
+      async markMessagesAsRead(orderId) { // This function is order-specific
+      if (!orderId) {
+        // Cannot mark messages as read for a direct chat without an orderId via this method
+        // A different API might be needed for direct chats e.g. PATCH /messages/read/user/{userId}
+        console.log('markMessagesAsRead called without orderId (likely direct chat), skipping.');
+        return;
+      }
       console.log('Attempting to mark messages as read for order:', orderId);
       try {
         const response = await this.$api.patch(`/messages/read/${orderId}`);
         if (response.data && response.data.status) {
           console.log('Successfully marked messages as read for order (API):', orderId);
 
-          const convoIndex = this.conversations.findIndex(c => c.order.id === orderId);
+          // Update unreadCount for the specific order-based conversation
+          const conversationKey = `order-${orderId}`;
+          const convoIndex = this.conversations.findIndex(c => c.id === conversationKey);
           if (convoIndex !== -1) {
             if (typeof this.conversations[convoIndex].unreadCount === 'number') {
                this.conversations[convoIndex].unreadCount = 0;
@@ -308,14 +435,12 @@ export default {
           }
         } else {
           console.error('Failed to mark messages as read: API returned unsuccessful status for order ' + orderId, response.data);
-          // Do not alert here as it might be too intrusive if it fails silently
         }
       } catch (error) {
         console.error('Error marking messages as read for order ' + orderId + ':', error);
         if (error.response) {
           console.error('Error response data:', error.response.data);
         }
-        // Do not alert here
       }
     },
     formatTimestamp(timestamp) {
