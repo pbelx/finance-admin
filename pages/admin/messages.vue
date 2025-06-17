@@ -244,9 +244,16 @@ export default {
             timestamp: lastMessageInGroup.created_at,
             sender_type: lastMessageInGroup.sender_type,
           },
-          // As per prompt, GET /messages returns unread messages for the admin.
-          // So, the length of the group is the unread count for this conversation.
-          unreadCount: groupMessages.length,
+          unreadCount: (() => {
+            const currentAdminUserId = this.adminUserId;
+            if (currentAdminUserId) {
+              return groupMessages.filter(
+                msg => !msg.is_read && msg.recipient && msg.recipient.id === currentAdminUserId
+              ).length;
+            }
+            console.warn("Admin user ID not available, unread count for conversations may not be accurate for the admin.");
+            return 0; // Default to 0 if adminUserId is not available
+          })(),
         };
       });
 
@@ -255,37 +262,58 @@ export default {
 
       this.conversations = processedConversations;
     },
-    selectConversation(conversation) {
+    async selectConversation(conversation) { // Make method async
       console.log('Selected conversation:', conversation);
       this.selectedConversation = conversation;
-      this.chatHistory = []; // Clear previous chat history
-      this.loadingChatHistory = true; // Set loading true initially
+      this.chatHistory = [];
+      this.loadingChatHistory = true;
 
-      if (conversation.isDirectChat) {
-        console.log(`Displaying initially fetched messages for direct chat with user ${conversation.user?.id}. This may not be the full history.`);
-
-        const directMessages = (this.rawInitialMessages || []).filter(msg => {
-          if (msg.order) return false; // Must not have an order
-
-          const memberId = conversation.user?.id;
-          if (!memberId) return false;
-
-          const isMemberSender = msg.sender_type === 'user' && msg.sender && msg.sender.id === memberId;
-          const isMemberRecipient = msg.sender_type === 'admin' && msg.recipient && msg.recipient.id === memberId;
-
-          return isMemberSender || isMemberRecipient;
-        });
-
-        this.chatHistory = directMessages.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-        this.loadingChatHistory = false;
-
-      } else if (conversation.order && conversation.order.id) {
-        // It's an order chat, fetch full history (this already sets loadingChatHistory internally)
-        this.fetchChatHistory(conversation.order.id);
-      } else {
-        console.warn('Selected conversation is neither a valid direct chat nor an order chat:', conversation);
-        this.chatHistory = []; // Ensure it's clear
-        this.loadingChatHistory = false; // Ensure loading is off
+      try {
+        if (conversation.isDirectChat) {
+          if (!conversation.user || !conversation.user.id) {
+            console.error('Cannot fetch direct chat: Member ID is missing.', conversation);
+            alert('Cannot load direct chat: User details are incomplete.');
+            this.chatHistory = []; // Ensure chat history is clear
+            // this.loadingChatHistory = false; // Will be handled by finally
+            return; // Exit early
+          }
+          console.log(`Fetching full history for direct chat with user ${conversation.user.id}`);
+          const response = await this.$api.get(`/messages/direct/${conversation.user.id}`);
+          if (response.data && response.data.status) {
+            this.chatHistory = response.data.payload || []; // Payload is expected to be sorted array of messages
+          } else {
+            console.error('Failed to fetch direct chat history: API returned unsuccessful status', response.data);
+            alert('Failed to load direct chat history. ' + (response.data?.payload || 'Unknown API error.'));
+            this.chatHistory = [];
+          }
+        } else if (conversation.order && conversation.order.id) {
+          // For order chats, call the existing fetchChatHistory method.
+          // fetchChatHistory is already async and handles its own loading flags and errors.
+          await this.fetchChatHistory(conversation.order.id);
+          // loadingChatHistory will be managed by fetchChatHistory's finally block
+        } else {
+          console.warn('Selected conversation is neither a valid direct chat nor an order chat:', conversation);
+          alert('Cannot load conversation: Invalid conversation data.');
+          this.chatHistory = [];
+        }
+      } catch (error) {
+        console.error('Error in selectConversation:', error);
+        if (error.response) {
+          console.error('Error response data:', error.response.data);
+          alert(`Failed to load conversation: ${error.response.data?.payload || error.message}`);
+        } else {
+          alert('Failed to load conversation: ' + error.message);
+        }
+        this.chatHistory = []; // Ensure chat history is clear on error
+      } finally {
+        // If fetchChatHistory was called, it handles its own loading flag.
+        // If it was a direct chat, or an invalid selection that didn't call fetchChatHistory,
+        // or if fetchChatHistory was called but we want a final say:
+        if (conversation.isDirectChat || (!conversation.order || !conversation.order.id)) {
+             this.loadingChatHistory = false;
+        }
+        // If fetchChatHistory was awaited, its finally would have run.
+        // This ensures it's false if the direct chat path or error path was taken before calling fetchChatHistory.
       }
     },
     async fetchChatHistory(orderId) {
